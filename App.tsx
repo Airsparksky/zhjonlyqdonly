@@ -9,9 +9,12 @@ import {
 } from './services/gameLogic';
 import PlayerSeat from './components/PlayerSeat';
 import CardComponent from './components/CardComponent';
-import { Coins, Eye, Trophy, RefreshCw, XCircle, Swords, ArrowUpCircle, Zap, Users, Copy, LogIn, Wifi, UserPlus, LogOut, Play, AlertTriangle, Server as ServerIcon } from 'lucide-react';
+import { Coins, Eye, Trophy, RefreshCw, XCircle, Swords, ArrowUpCircle, Zap, Users, Copy, LogIn, Wifi, UserPlus, LogOut, Play, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { io, Socket } from 'socket.io-client';
+
+// --- Configuration ---
+const SERVER_URL = "https://zjhhd.zeabur.app";
 
 // --- Utils ---
 const getRandomAvatar = () => {
@@ -180,10 +183,8 @@ const Lobby: React.FC<{
     players: Player[],
     onStartGame: () => void,
     isHost: boolean,
-    connectionStatus: string,
-    serverUrl: string,
-    setServerUrl: (url: string) => void
-}> = ({ onCreate, onJoin, roomCode, players, onStartGame, isHost, connectionStatus, serverUrl, setServerUrl }) => {
+    connectionStatus: string
+}> = ({ onCreate, onJoin, roomCode, players, onStartGame, isHost, connectionStatus }) => {
     const [inputCode, setInputCode] = useState('');
     const [customRoomId, setCustomRoomId] = useState('');
     const [lobbyMode, setLobbyMode] = useState<'MENU' | 'HOSTING' | 'JOINING'>('MENU');
@@ -205,7 +206,7 @@ const Lobby: React.FC<{
         return (
              <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center backdrop-blur-md">
                 <div className="bg-gray-900 p-8 rounded-2xl border border-yellow-500/50 shadow-[0_0_50px_rgba(234,179,8,0.2)] w-full max-w-md text-center">
-                    <h2 className="text-3xl font-serif font-bold text-yellow-400 mb-6">联机大厅 (Socket)</h2>
+                    <h2 className="text-3xl font-serif font-bold text-yellow-400 mb-6">联机大厅</h2>
                     
                     <div className="mb-6">
                         <p className="text-gray-400 text-sm mb-2">将房间号分享给好友:</p>
@@ -234,8 +235,6 @@ const Lobby: React.FC<{
                         ))}
                     </div>
 
-                    <div className="text-sm text-gray-500 mb-4 font-mono truncate">{serverUrl || 'Using Localhost'}</div>
-
                     <button 
                         onClick={onStartGame}
                         disabled={players.filter(p => p.isHuman).length < 1}
@@ -258,7 +257,7 @@ const Lobby: React.FC<{
          return (
              <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center backdrop-blur-md">
                 <div className="bg-gray-900 p-8 rounded-2xl border border-blue-500/50 shadow-[0_0_50px_rgba(59,130,246,0.2)] w-full max-w-md text-center">
-                    <h2 className="text-3xl font-serif font-bold text-blue-400 mb-6">加入游戏 (Socket)</h2>
+                    <h2 className="text-3xl font-serif font-bold text-blue-400 mb-6">加入游戏</h2>
                     
                     <div className="mb-6">
                         <p className="text-gray-400 text-sm mb-2">输入房主的房间号:</p>
@@ -301,22 +300,7 @@ const Lobby: React.FC<{
                 <h1 className="text-6xl font-serif font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-yellow-600 mb-2">炸金花</h1>
                 <div className="flex flex-col items-center mb-6">
                     <p className="text-gray-400 tracking-widest text-lg">ZHA JIN HUA - 修复bug1</p>
-                    <span className="text-[10px] text-gray-600 mt-1 uppercase">WebSocket Edition</span>
-                </div>
-
-                {/* Server URL Input */}
-                <div className="w-full max-w-md mb-8 flex flex-col gap-1">
-                     <label className="text-xs text-gray-400 ml-1">后端服务器地址 (部署在 Zeabur 上的 server.js)</label>
-                     <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-gray-600">
-                         <ServerIcon size={16} className="text-gray-500" />
-                         <input 
-                            type="text"
-                            value={serverUrl}
-                            onChange={(e) => setServerUrl(e.target.value)}
-                            placeholder="例如: https://my-app.zeabur.app"
-                            className="flex-1 bg-transparent text-sm text-gray-300 focus:outline-none font-mono"
-                         />
-                     </div>
+                    <span className="text-[10px] text-gray-600 mt-1 uppercase">Online Edition</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 w-full">
@@ -363,7 +347,7 @@ const Lobby: React.FC<{
                                 <Wifi size={32} className="text-yellow-400" />
                             </div>
                             <h3 className="text-xl font-bold text-white mb-2">创建房间</h3>
-                            <p className="text-gray-400 text-sm text-center">创建公网房间 (需配置Server)</p>
+                            <p className="text-gray-400 text-sm text-center">创建公网房间</p>
                         </div>
                         <div className="border-t border-gray-700 pt-3 w-full">
                             <input 
@@ -406,7 +390,6 @@ const App: React.FC = () => {
   const [inLobby, setInLobby] = useState(true);
   
   // Socket Config
-  const [serverUrl, setServerUrl] = useState<string>(''); // Default empty to force user input or use placeholder
   const socketRef = useRef<Socket | null>(null);
 
   const [players, setPlayers] = useState<Player[]>([
@@ -448,15 +431,9 @@ const App: React.FC = () => {
   const initSocket = () => {
       if (socketRef.current) return socketRef.current;
       
-      let url = serverUrl;
-      // Strip trailing slash if present to avoid socket.io issues
+      let url = SERVER_URL;
       if (url.endsWith('/')) {
         url = url.slice(0, -1);
-      }
-      
-      if (!url) {
-          setConnectionStatus('错误: 请先输入服务器地址');
-          return null;
       }
       
       const socket = io(url, {
@@ -467,7 +444,7 @@ const App: React.FC = () => {
 
       socket.on('connect_error', (err) => {
           console.error("Socket error", err);
-          setConnectionStatus(`连接失败: ${err.message}. 请检查地址.`);
+          setConnectionStatus(`连接失败: ${err.message}. 请检查服务器.`);
       });
 
       socketRef.current = socket;
@@ -1036,8 +1013,6 @@ const App: React.FC = () => {
         onStartGame={startNewGame}
         isHost={networkMode === 'HOST'}
         connectionStatus={connectionStatus}
-        serverUrl={serverUrl}
-        setServerUrl={setServerUrl}
       />;
   }
 
