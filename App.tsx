@@ -501,6 +501,7 @@ const App: React.FC = () => {
       // Listen for ACTIONS from clients
       socket.on('game-message', (data: GameMessage) => {
           if (data.type === 'ACTION') {
+              console.log("[HOST] Received Action Payload:", data.payload);
               handleRemoteActionRef.current(data.payload as ActionPayload);
           }
       });
@@ -525,8 +526,6 @@ const App: React.FC = () => {
       
       socket.on('disconnect', () => {
           setConnectionStatus("与服务器断开连接");
-          // alert("与服务器断开连接");
-          // setInLobby(true);
       });
   };
 
@@ -608,16 +607,23 @@ const App: React.FC = () => {
   // Handle Remote Action (Host Side)
   const handleRemoteAction = (payload: ActionPayload) => {
       const { action, playerId, amount, targetId } = payload;
-      if (currentTurnIndex !== playerId) return;
+      // Strict Type Check for ID
+      const reqId = Number(playerId);
+      if (currentTurnIndex !== reqId) {
+          console.warn(`[HOST] Reject Action: Turn is ${currentTurnIndex}, Req is ${reqId}`);
+          return;
+      }
+
+      console.log(`[HOST] Processing Action ${action} for P${reqId}`);
 
       switch (action) {
-          case 'FOLD': handleFold(playerId); break;
-          case 'CALL': handleCall(playerId); break;
-          case 'RAISE': if (amount) handleRaise(playerId, amount); break;
-          case 'ALL_IN': handleAllIn(playerId); break;
-          case 'SEE_CARDS': handleSeeCards(playerId); break;
-          case 'COMPARE_INIT': initiateCompare(playerId); break;
-          case 'COMPARE_TARGET': if (targetId !== undefined) resolveCompare(playerId, targetId); break;
+          case 'FOLD': handleFold(reqId); break;
+          case 'CALL': handleCall(reqId); break;
+          case 'RAISE': if (amount) handleRaise(reqId, amount); break;
+          case 'ALL_IN': handleAllIn(reqId); break;
+          case 'SEE_CARDS': handleSeeCards(reqId); break;
+          case 'COMPARE_INIT': initiateCompare(reqId); break;
+          case 'COMPARE_TARGET': if (targetId !== undefined) resolveCompare(reqId, targetId); break;
       }
   };
 
@@ -625,7 +631,7 @@ const App: React.FC = () => {
       handleRemoteActionRef.current = handleRemoteAction;
   }); 
 
-  // --- Helpers & Effects --- (Same as before)
+  // --- Helpers & Effects --- 
   const getPlayerPositionCSS = (id: number): { x: string, y: string } => {
       if (id === 0) return { x: '50%', y: '90%' }; 
       if (players.length <= 3) {
@@ -648,22 +654,18 @@ const App: React.FC = () => {
     return players.filter(p => p.status === PlayerStatus.PLAYING);
   }, [players]);
 
-  const nextTurn = useCallback(() => {
-    setPlayers(prevPlayers => prevPlayers.map(p => ({...p, lastAction: undefined})));
-
-    setCurrentTurnIndex(prev => {
-      let next = (prev + 1) % players.length;
+  // Helper to calculate next turn index based on a FUTURE players list
+  const calculateNextTurnIndex = (currentIdx: number, currentPlayers: Player[]) => {
+      let next = (currentIdx + 1) % currentPlayers.length;
       let safe = 0;
-      while (players[next].status !== PlayerStatus.PLAYING && safe < 20) {
-        next = (next + 1) % players.length;
+      while (currentPlayers[next].status !== PlayerStatus.PLAYING && safe < 20) {
+        next = (next + 1) % currentPlayers.length;
         safe++;
       }
       return next;
-    });
-  }, [players]);
+  };
 
-
-  // --- Actions ---
+  // --- Actions (REFACTORED FOR ATOMIC UPDATES) ---
 
   const startNewGame = async () => {
     if (networkMode === 'HOST' || networkMode === 'OFFLINE') {
@@ -672,17 +674,9 @@ const App: React.FC = () => {
 
     const newDeck = generateDeck();
     const startIdx = Math.floor(Math.random() * players.length);
-    
-    setGamePhase(GamePhase.DEALING);
-    setWinnerId(null);
-    setComparingInitiatorId(null);
-    setRaiseCount(0);
     const startMsg = '游戏开始，正在发牌...';
-    setLogs([{ id: 'start', message: startMsg }]);
-    setPot(0);
-    setDeck(newDeck);
     
-    // Reset Players
+    // Initial Reset State
     const resetPlayers = players.map((p, idx) => ({
       ...p,
       cards: [],
@@ -694,13 +688,22 @@ const App: React.FC = () => {
       lastAction: undefined
     }));
     
+    // Update all state at once for start
+    setGamePhase(GamePhase.DEALING);
+    setWinnerId(null);
+    setComparingInitiatorId(null);
+    setRaiseCount(0);
+    setLogs([{ id: 'start', message: startMsg }]);
     setPot(players.length * ANTE);
+    setDeck(newDeck);
     setPlayers(resetPlayers);
     setCurrentTurnIndex(startIdx);
     setCurrentRoundBet(ANTE);
     
     // Broadcast START event
     if (networkMode === 'HOST' && socketRef.current) {
+         // ... existing broadcast logic (will be handled by useEffect mostly, but START is special event)
+         // Actually better to manually emit here to ensure CLIENT gets the event type
          const state = {
             players: resetPlayers,
             pot: players.length * ANTE,
@@ -717,13 +720,14 @@ const App: React.FC = () => {
          socketRef.current.emit('game-message', { roomId: roomCode, message: msg });
     }
 
-    // Animate Dealing
+    // Animation Delay Logic (Local Only mostly)
     const activeIds = resetPlayers.filter(p => p.status === PlayerStatus.PLAYING).map(p => p.id);
     const dealingDeck = [...newDeck];
     
+    // Fast deal animation
     for (let i = 0; i < 3; i++) {
         for (const pid of activeIds) {
-            await new Promise(r => setTimeout(r, 150));
+            await new Promise(r => setTimeout(r, 100)); // Faster deal
             const card = dealingDeck.pop();
             if (card) {
                 setPlayers(prev => prev.map(p => p.id === pid ? { ...p, cards: [...p.cards, card] } : p));
@@ -744,16 +748,29 @@ const App: React.FC = () => {
   }, [players, pot, gamePhase, currentTurnIndex, currentRoundBet, networkMode, inLobby, broadcastState]);
 
 
-  // --- Game Logic Handlers (Same as before) ---
+  // --- Refactored Handlers ---
 
   const handleFold = (playerId: number) => {
     if (networkMode === 'CLIENT' && playerId === myPlayerId) {
         sendAction({ action: 'FOLD', playerId });
         return;
     }
+    
+    // 1. Calculate New Players State
+    const newPlayers = players.map(p => {
+        if (p.id === playerId) {
+            return { ...p, status: PlayerStatus.FOLDED, lastAction: '弃牌', lastActionType: 'negative' as const };
+        }
+        return p; 
+    });
+
+    // 2. Calculate Next Turn
+    const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
+
+    // 3. Update Everything
     addLog(`${players[playerId].name} 弃牌。`);
-    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, status: PlayerStatus.FOLDED, lastAction: '弃牌', lastActionType: 'negative' } : p));
-    nextTurn();
+    setPlayers(newPlayers);
+    setCurrentTurnIndex(nextIndex);
   };
 
   const handleSeeCards = (playerId: number) => {
@@ -761,6 +778,7 @@ const App: React.FC = () => {
         sendAction({ action: 'SEE_CARDS', playerId });
         return;
     }
+    // See cards doesn't change turn
     setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, hasSeenCards: true, lastAction: '👀 看牌' } : p));
   };
 
@@ -777,18 +795,29 @@ const App: React.FC = () => {
         return;
     }
 
+    // Effects
     triggerChipEffect(playerId);
     if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) {
-        return { ...p, chips: p.chips - amountToCall, currentBet: amountToCall, lastAction: `跟注 ${amountToCall}`, lastActionType: 'neutral' };
-      }
-      return p;
-    }));
-    setPot(prev => prev + amountToCall);
+    // 1. Calculate New Players
+    const newPlayers = players.map(p => {
+        if (p.id === playerId) {
+             return { ...p, chips: p.chips - amountToCall, currentBet: amountToCall, lastAction: `跟注 ${amountToCall}`, lastActionType: 'neutral' as const };
+        }
+        return p;
+    });
+
+    // 2. Calculate Pot
+    const newPot = pot + amountToCall;
+
+    // 3. Calculate Next Turn
+    const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
+
+    // 4. Update
+    setPlayers(newPlayers);
+    setPot(newPot);
+    setCurrentTurnIndex(nextIndex);
     addLog(`${player.name} 跟注 ${amountToCall}。`);
-    nextTurn();
   };
 
   const handleRaise = (playerId: number, raiseAmount: number) => {
@@ -806,18 +835,22 @@ const App: React.FC = () => {
     triggerChipEffect(playerId);
     if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) {
-        return { ...p, chips: p.chips - raiseAmount, currentBet: raiseAmount, lastAction: `加注 ${raiseAmount}`, lastActionType: 'positive' };
-      }
-      return p;
-    }));
-    
-    setPot(prev => prev + raiseAmount);
+    const newPlayers = players.map(p => {
+        if (p.id === playerId) {
+            return { ...p, chips: p.chips - raiseAmount, currentBet: raiseAmount, lastAction: `加注 ${raiseAmount}`, lastActionType: 'positive' as const };
+        }
+        return p;
+    });
+
+    const newPot = pot + raiseAmount;
+    const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
+
+    setPlayers(newPlayers);
+    setPot(newPot);
     setCurrentRoundBet(raiseAmount);
     setRaiseCount(prev => prev + 1);
-    addLog(`${player.name} 加注至 ${raiseAmount}。 (第${raiseCount + 1}/10次)`);
-    nextTurn();
+    setCurrentTurnIndex(nextIndex);
+    addLog(`${player.name} 加注至 ${raiseAmount}。`);
   };
 
   const handleAllIn = (playerId: number) => {
@@ -831,16 +864,24 @@ const App: React.FC = () => {
     triggerChipEffect(playerId);
     if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) {
-        return { ...p, chips: 0, currentBet: allInAmount, lastAction: 'ALL IN!', lastActionType: 'positive' }; 
-      }
-      return p;
-    }));
-    setPot(prev => prev + allInAmount);
-    if (allInAmount > currentRoundBet) setCurrentRoundBet(allInAmount);
+    const newPlayers = players.map(p => {
+        if (p.id === playerId) {
+            return { ...p, chips: 0, currentBet: allInAmount, lastAction: 'ALL IN!', lastActionType: 'positive' as const }; 
+        }
+        return p;
+    });
+
+    const newPot = pot + allInAmount;
+    // Update round bet if All-In exceeds it (Standard Poker Rule, though some variations differ. We'll allow it to set bar)
+    const newRoundBet = allInAmount > currentRoundBet ? allInAmount : currentRoundBet;
+    
+    const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
+
+    setPlayers(newPlayers);
+    setPot(newPot);
+    setCurrentRoundBet(newRoundBet);
+    setCurrentTurnIndex(nextIndex);
     addLog(`${player.name} 全压 ALL-IN (${allInAmount})!`);
-    nextTurn();
   };
 
   const initiateCompare = (initiatorId: number) => {
@@ -856,6 +897,7 @@ const App: React.FC = () => {
     triggerChipEffect(initiatorId);
     if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId: initiatorId });
 
+    // Deduct chips immediately
     setPlayers(prev => prev.map(p => p.id === initiatorId ? { ...p, chips: p.chips - cost } : p));
     setPot(prev => prev + cost);
     
@@ -869,7 +911,8 @@ const App: React.FC = () => {
         const target = activeOpponents[Math.floor(Math.random() * activeOpponents.length)];
         resolveCompare(initiatorId, target.id);
       } else {
-        nextTurn();
+        // Should not happen if game checks active players count
+        handleGameEnd(initiatorId);
       }
     }
   };
@@ -914,29 +957,22 @@ const App: React.FC = () => {
 
       addLog(`结果: ${winnerName} 赢得了比牌！`);
       
+      // Update statuses
       const newPlayers = players.map(p => {
           if (p.id === loserId) return { ...p, status: PlayerStatus.LOST, lastAction: '比牌输', lastActionType: 'negative' as const };
           if (p.id === winnerId) return { ...p, lastAction: '比牌赢', lastActionType: 'positive' as const };
           return p;
       });
 
+      // Find next player
+      // Start searching from current turn (initiator) + 1
+      const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
+      
+      // Update State
       setPlayers(newPlayers);
       setGamePhase(GamePhase.BETTING);
       setComparingInitiatorId(null);
       setCompareData(null);
-      
-      let nextIndex = (currentTurnIndex + 1) % newPlayers.length;
-      let safe = 0;
-      while (newPlayers[nextIndex].status !== PlayerStatus.PLAYING && safe < 20) {
-         nextIndex = (nextIndex + 1) % newPlayers.length;
-         safe++;
-      }
-      
-      const cleanedPlayers = newPlayers.map(p => {
-          if (p.id === loserId || p.id === winnerId) return p;
-          return { ...p, lastAction: undefined };
-      });
-      setPlayers(cleanedPlayers);
       setCurrentTurnIndex(nextIndex);
   };
 
@@ -984,7 +1020,7 @@ const App: React.FC = () => {
       }, 1500); 
       return () => clearTimeout(timer);
     }
-  }, [currentTurnIndex, gamePhase, players, pot, currentRoundBet, getActivePlayers, nextTurn, handleGameEnd, raiseCount, networkMode]); 
+  }, [currentTurnIndex, gamePhase, players, pot, currentRoundBet, getActivePlayers, handleGameEnd, raiseCount, networkMode]); // Removed nextTurn from dep as it is not needed here directly
 
 
   // --- Render ---
