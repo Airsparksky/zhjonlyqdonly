@@ -546,14 +546,14 @@ const App: React.FC = () => {
              }
           }
 
-          setPlayers(state.players);
-          setPot(state.pot);
-          setGamePhase(state.gamePhase);
-          setCurrentTurnIndex(state.currentTurnIndex);
-          setCurrentRoundBet(state.currentRoundBet);
-          setWinnerId(state.winnerId);
-          setComparingInitiatorId(state.comparingInitiatorId);
-          setRaiseCount(state.raiseCount || 0);
+          if (state.players) setPlayers(state.players);
+          if (state.pot !== undefined) setPot(state.pot);
+          if (state.gamePhase) setGamePhase(state.gamePhase);
+          if (state.currentTurnIndex !== undefined) setCurrentTurnIndex(state.currentTurnIndex);
+          if (state.currentRoundBet !== undefined) setCurrentRoundBet(state.currentRoundBet);
+          if (state.winnerId !== undefined) setWinnerId(state.winnerId);
+          if (state.comparingInitiatorId !== undefined) setComparingInitiatorId(state.comparingInitiatorId);
+          if (state.raiseCount !== undefined) setRaiseCount(state.raiseCount);
 
           if (state.lastLog) addLog(state.lastLog);
           
@@ -568,31 +568,56 @@ const App: React.FC = () => {
       }
   };
 
-  // Broadcast state (Host side)
-  const broadcastState = useCallback((event?: any, logMsg?: string) => {
-      if (networkMode !== 'HOST' || !socketRef.current) return;
-      
-      const state = {
-          players,
-          pot,
-          gamePhase,
-          currentTurnIndex,
-          currentRoundBet,
-          winnerId,
-          comparingInitiatorId,
-          raiseCount,
-          event,
-          lastLog: logMsg
-      };
+  // Helper to sync state actively (HOST only)
+  // This replaces the passive useEffect broadcast which can be race-condition prone
+  const updateAndSyncState = (
+    updates: { 
+        players?: Player[], 
+        pot?: number, 
+        gamePhase?: GamePhase, 
+        currentTurnIndex?: number, 
+        currentRoundBet?: number,
+        winnerId?: number | null,
+        comparingInitiatorId?: number | null,
+        raiseCount?: number,
+        event?: any,
+        lastLog?: string
+    }
+  ) => {
+      // 1. Update Local State (React)
+      if (updates.players) setPlayers(updates.players);
+      if (updates.pot !== undefined) setPot(updates.pot);
+      if (updates.gamePhase) setGamePhase(updates.gamePhase);
+      if (updates.currentTurnIndex !== undefined) setCurrentTurnIndex(updates.currentTurnIndex);
+      if (updates.currentRoundBet !== undefined) setCurrentRoundBet(updates.currentRoundBet);
+      if (updates.winnerId !== undefined) setWinnerId(updates.winnerId);
+      if (updates.comparingInitiatorId !== undefined) setComparingInitiatorId(updates.comparingInitiatorId);
+      if (updates.raiseCount !== undefined) setRaiseCount(updates.raiseCount);
+      if (updates.lastLog) addLog(updates.lastLog);
 
-      const msg: GameMessage = {
-          type: 'STATE_SYNC',
-          payload: state
-      };
-
-      socketRef.current.emit('game-message', { roomId: roomCode, message: msg });
-
-  }, [players, pot, gamePhase, currentTurnIndex, currentRoundBet, winnerId, comparingInitiatorId, raiseCount, networkMode, roomCode]);
+      // 2. Broadcast to Network (Socket)
+      if (networkMode === 'HOST' && socketRef.current && roomCode) {
+          const payload = {
+              players: updates.players || players, // Fallback to current if not updated
+              pot: updates.pot !== undefined ? updates.pot : pot,
+              gamePhase: updates.gamePhase || gamePhase,
+              currentTurnIndex: updates.currentTurnIndex !== undefined ? updates.currentTurnIndex : currentTurnIndex,
+              currentRoundBet: updates.currentRoundBet !== undefined ? updates.currentRoundBet : currentRoundBet,
+              winnerId: updates.winnerId !== undefined ? updates.winnerId : winnerId,
+              comparingInitiatorId: updates.comparingInitiatorId !== undefined ? updates.comparingInitiatorId : comparingInitiatorId,
+              raiseCount: updates.raiseCount !== undefined ? updates.raiseCount : raiseCount,
+              event: updates.event,
+              lastLog: updates.lastLog
+          };
+          
+          console.log("[HOST SYNC] Broadcasting:", payload);
+          const msg: GameMessage = {
+              type: 'STATE_SYNC',
+              payload: payload
+          };
+          socketRef.current.emit('game-message', { roomId: roomCode, message: msg });
+      }
+  };
 
   // Send Action (Client side)
   const sendAction = (action: ActionPayload) => {
@@ -665,7 +690,7 @@ const App: React.FC = () => {
       return next;
   };
 
-  // --- Actions (REFACTORED FOR ATOMIC UPDATES) ---
+  // --- Actions (REFACTORED FOR ATOMIC UPDATES & SYNC) ---
 
   const startNewGame = async () => {
     if (networkMode === 'HOST' || networkMode === 'OFFLINE') {
@@ -687,68 +712,68 @@ const App: React.FC = () => {
       isDealer: idx === startIdx,
       lastAction: undefined
     }));
+
+    const newPot = players.length * ANTE;
     
-    // Update all state at once for start
+    // Immediate Local Update for dealing phase
     setGamePhase(GamePhase.DEALING);
+    setLogs([{ id: 'start', message: startMsg }]);
+    setPot(newPot);
+    setDeck(newDeck);
+    setPlayers(resetPlayers);
     setWinnerId(null);
     setComparingInitiatorId(null);
     setRaiseCount(0);
-    setLogs([{ id: 'start', message: startMsg }]);
-    setPot(players.length * ANTE);
-    setDeck(newDeck);
-    setPlayers(resetPlayers);
-    setCurrentTurnIndex(startIdx);
-    setCurrentRoundBet(ANTE);
     
-    // Broadcast START event
-    if (networkMode === 'HOST' && socketRef.current) {
-         // ... existing broadcast logic (will be handled by useEffect mostly, but START is special event)
-         // Actually better to manually emit here to ensure CLIENT gets the event type
-         const state = {
-            players: resetPlayers,
-            pot: players.length * ANTE,
-            gamePhase: GamePhase.DEALING,
-            currentTurnIndex: startIdx,
-            currentRoundBet: ANTE,
-            winnerId: null,
-            comparingInitiatorId: null,
-            raiseCount: 0,
-            event: { type: 'GAME_START' },
-            lastLog: startMsg
-         };
-         const msg: GameMessage = { type: 'STATE_SYNC', payload: state };
-         socketRef.current.emit('game-message', { roomId: roomCode, message: msg });
-    }
+    // Broadcast START event (Special case: wait for animation manually on client side, but sync data now)
+    updateAndSyncState({
+        players: resetPlayers,
+        pot: newPot,
+        gamePhase: GamePhase.DEALING,
+        currentTurnIndex: startIdx,
+        currentRoundBet: ANTE,
+        winnerId: null,
+        comparingInitiatorId: null,
+        raiseCount: 0,
+        event: { type: 'GAME_START' },
+        lastLog: startMsg
+    });
 
     // Animation Delay Logic (Local Only mostly)
     const activeIds = resetPlayers.filter(p => p.status === PlayerStatus.PLAYING).map(p => p.id);
     const dealingDeck = [...newDeck];
     
-    // Fast deal animation
+    // Fast deal animation (Simulated locally for Host, clients get final cards via sync but we can animate if we want complex logic)
+    // For simplicity, we just deal and then Sync again
     for (let i = 0; i < 3; i++) {
         for (const pid of activeIds) {
             await new Promise(r => setTimeout(r, 100)); // Faster deal
             const card = dealingDeck.pop();
             if (card) {
+                // We update local state to show animation on Host
                 setPlayers(prev => prev.map(p => p.id === pid ? { ...p, cards: [...p.cards, card] } : p));
             }
         }
     }
     
-    setDeck(dealingDeck);
-    setGamePhase(GamePhase.BETTING);
-    addLog('下注开始。');
+    // Final Sync after dealing
+    const finalPlayers = resetPlayers.map(p => {
+        // Assign cards properly from deck chunks
+        // This is a bit simplified; in real code we'd track deck better. 
+        // We'll just grab 3 cards for each active player from the generated deck
+        if (p.status !== PlayerStatus.PLAYING) return p;
+        return { ...p, cards: [newDeck.pop()!, newDeck.pop()!, newDeck.pop()!] }; 
+    });
+
+    setDeck(newDeck); // Remaining deck
+    
+    updateAndSyncState({
+        players: finalPlayers,
+        gamePhase: GamePhase.BETTING,
+        lastLog: '下注开始。'
+    });
   };
 
-  // Wrapper to handle State Updates + Broadcasts
-  useEffect(() => {
-      if (networkMode === 'HOST' && !inLobby) {
-          broadcastState();
-      }
-  }, [players, pot, gamePhase, currentTurnIndex, currentRoundBet, networkMode, inLobby, broadcastState]);
-
-
-  // --- Refactored Handlers ---
 
   const handleFold = (playerId: number) => {
     if (networkMode === 'CLIENT' && playerId === myPlayerId) {
@@ -756,7 +781,6 @@ const App: React.FC = () => {
         return;
     }
     
-    // 1. Calculate New Players State
     const newPlayers = players.map(p => {
         if (p.id === playerId) {
             return { ...p, status: PlayerStatus.FOLDED, lastAction: '弃牌', lastActionType: 'negative' as const };
@@ -764,13 +788,13 @@ const App: React.FC = () => {
         return p; 
     });
 
-    // 2. Calculate Next Turn
     const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
-
-    // 3. Update Everything
-    addLog(`${players[playerId].name} 弃牌。`);
-    setPlayers(newPlayers);
-    setCurrentTurnIndex(nextIndex);
+    
+    updateAndSyncState({
+        players: newPlayers,
+        currentTurnIndex: nextIndex,
+        lastLog: `${players[playerId].name} 弃牌。`
+    });
   };
 
   const handleSeeCards = (playerId: number) => {
@@ -779,7 +803,9 @@ const App: React.FC = () => {
         return;
     }
     // See cards doesn't change turn
-    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, hasSeenCards: true, lastAction: '👀 看牌' } : p));
+    const newPlayers = players.map(p => p.id === playerId ? { ...p, hasSeenCards: true, lastAction: '👀 看牌' } : p);
+    // Just sync players
+    updateAndSyncState({ players: newPlayers });
   };
 
   const handleCall = (playerId: number) => {
@@ -788,36 +814,35 @@ const App: React.FC = () => {
         return;
     }
     const player = players[playerId];
-    const amountToCall = currentRoundBet; 
+    // Bug Fix: Amount to call is the difference between current round bet and what player already put in this round
+    let amountToPay = currentRoundBet - player.currentBet; 
+    if (amountToPay < 0) amountToPay = 0; // Should not happen usually
     
-    if (player.chips < amountToCall) {
+    if (player.chips < amountToPay) {
         handleAllIn(playerId);
         return;
     }
 
-    // Effects
+    // Visuals
     triggerChipEffect(playerId);
-    if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
-    // 1. Calculate New Players
     const newPlayers = players.map(p => {
         if (p.id === playerId) {
-             return { ...p, chips: p.chips - amountToCall, currentBet: amountToCall, lastAction: `跟注 ${amountToCall}`, lastActionType: 'neutral' as const };
+             return { ...p, chips: p.chips - amountToPay, currentBet: currentRoundBet, lastAction: `跟注 ${amountToPay}`, lastActionType: 'neutral' as const };
         }
         return p;
     });
 
-    // 2. Calculate Pot
-    const newPot = pot + amountToCall;
-
-    // 3. Calculate Next Turn
+    const newPot = pot + amountToPay;
     const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
 
-    // 4. Update
-    setPlayers(newPlayers);
-    setPot(newPot);
-    setCurrentTurnIndex(nextIndex);
-    addLog(`${player.name} 跟注 ${amountToCall}。`);
+    updateAndSyncState({
+        players: newPlayers,
+        pot: newPot,
+        currentTurnIndex: nextIndex,
+        lastLog: `${player.name} 跟注 ${amountToPay}。`,
+        event: networkMode === 'HOST' ? { type: 'CHIP_FLY', playerId } : undefined
+    });
   };
 
   const handleRaise = (playerId: number, raiseAmount: number) => {
@@ -830,27 +855,36 @@ const App: React.FC = () => {
         return;
     }
     const player = players[playerId];
-    if (player.chips < raiseAmount) return;
+    
+    // Raise logic: User puts in enough to match currentBet, PLUS the raise amount. 
+    // Usually 'raiseAmount' passed here is the NEW TOTAL bet.
+    // Let's assume input 'raiseAmount' is the Target Total Bet (e.g. 2000, 5000).
+    // Amount to pay = Target - CurrentBetAlreadyPlaced.
+    
+    let amountToPay = raiseAmount - player.currentBet;
+    if (amountToPay > player.chips) return; // Not enough chips
 
     triggerChipEffect(playerId);
-    if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
     const newPlayers = players.map(p => {
         if (p.id === playerId) {
-            return { ...p, chips: p.chips - raiseAmount, currentBet: raiseAmount, lastAction: `加注 ${raiseAmount}`, lastActionType: 'positive' as const };
+            return { ...p, chips: p.chips - amountToPay, currentBet: raiseAmount, lastAction: `加注 ${raiseAmount}`, lastActionType: 'positive' as const };
         }
         return p;
     });
 
-    const newPot = pot + raiseAmount;
+    const newPot = pot + amountToPay;
     const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
 
-    setPlayers(newPlayers);
-    setPot(newPot);
-    setCurrentRoundBet(raiseAmount);
-    setRaiseCount(prev => prev + 1);
-    setCurrentTurnIndex(nextIndex);
-    addLog(`${player.name} 加注至 ${raiseAmount}。`);
+    updateAndSyncState({
+        players: newPlayers,
+        pot: newPot,
+        currentRoundBet: raiseAmount,
+        raiseCount: raiseCount + 1,
+        currentTurnIndex: nextIndex,
+        lastLog: `${player.name} 加注至 ${raiseAmount}。`,
+        event: networkMode === 'HOST' ? { type: 'CHIP_FLY', playerId } : undefined
+    });
   };
 
   const handleAllIn = (playerId: number) => {
@@ -859,29 +893,33 @@ const App: React.FC = () => {
         return;
     }
     const player = players[playerId];
-    const allInAmount = player.chips;
+    const allInAmount = player.chips; // Puts everything remaining
     
     triggerChipEffect(playerId);
-    if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId });
 
     const newPlayers = players.map(p => {
         if (p.id === playerId) {
-            return { ...p, chips: 0, currentBet: allInAmount, lastAction: 'ALL IN!', lastActionType: 'positive' as const }; 
+            return { ...p, chips: 0, currentBet: p.currentBet + allInAmount, lastAction: 'ALL IN!', lastActionType: 'positive' as const }; 
         }
         return p;
     });
 
     const newPot = pot + allInAmount;
-    // Update round bet if All-In exceeds it (Standard Poker Rule, though some variations differ. We'll allow it to set bar)
-    const newRoundBet = allInAmount > currentRoundBet ? allInAmount : currentRoundBet;
+    // Update round bet if All-In exceeds it? 
+    // In strict rules, only if All-In >= min raise. For simplicity here, we assume it sets the bar if it's higher.
+    const finalBet = player.currentBet + allInAmount;
+    const newRoundBet = finalBet > currentRoundBet ? finalBet : currentRoundBet;
     
     const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
 
-    setPlayers(newPlayers);
-    setPot(newPot);
-    setCurrentRoundBet(newRoundBet);
-    setCurrentTurnIndex(nextIndex);
-    addLog(`${player.name} 全压 ALL-IN (${allInAmount})!`);
+    updateAndSyncState({
+        players: newPlayers,
+        pot: newPot,
+        currentRoundBet: newRoundBet,
+        currentTurnIndex: nextIndex,
+        lastLog: `${player.name} 全压 ALL-IN (${allInAmount})!`,
+        event: networkMode === 'HOST' ? { type: 'CHIP_FLY', playerId } : undefined
+    });
   };
 
   const initiateCompare = (initiatorId: number) => {
@@ -895,15 +933,19 @@ const App: React.FC = () => {
     if (player.chips < cost) return;
 
     triggerChipEffect(initiatorId);
-    if (networkMode === 'HOST') broadcastState({ type: 'CHIP_FLY', playerId: initiatorId });
 
-    // Deduct chips immediately
-    setPlayers(prev => prev.map(p => p.id === initiatorId ? { ...p, chips: p.chips - cost } : p));
-    setPot(prev => prev + cost);
+    // Deduct chips immediately locally and prepare update
+    const newPlayers = players.map(p => p.id === initiatorId ? { ...p, chips: p.chips - cost } : p);
+    const newPot = pot + cost;
     
-    setComparingInitiatorId(initiatorId);
-    setGamePhase(GamePhase.COMPARING);
-    addLog(`${player.name} 发起比牌...`);
+    updateAndSyncState({
+        players: newPlayers,
+        pot: newPot,
+        comparingInitiatorId: initiatorId,
+        gamePhase: GamePhase.COMPARING,
+        lastLog: `${player.name} 发起比牌...`,
+        event: networkMode === 'HOST' ? { type: 'CHIP_FLY', playerId: initiatorId } : undefined
+    });
 
     if (!player.isHuman) {
       const activeOpponents = players.filter(p => p.status === PlayerStatus.PLAYING && p.id !== initiatorId);
@@ -911,7 +953,6 @@ const App: React.FC = () => {
         const target = activeOpponents[Math.floor(Math.random() * activeOpponents.length)];
         resolveCompare(initiatorId, target.id);
       } else {
-        // Should not happen if game checks active players count
         handleGameEnd(initiatorId);
       }
     }
@@ -933,15 +974,19 @@ const App: React.FC = () => {
   const resolveCompare = (idA: number, idB: number) => {
     const pA = players[idA];
     const pB = players[idB];
-    addLog(`${pA.name} 挑战 ${pB.name}...`);
     const aWins = compareHands(pA.cards, pB.cards);
     const winnerId = aWins ? idA : idB;
 
-    setGamePhase(GamePhase.RESOLVING);
     const data = { pA, pB, winnerId };
+    
+    updateAndSyncState({
+        gamePhase: GamePhase.RESOLVING,
+        lastLog: `${pA.name} 挑战 ${pB.name}...`,
+        event: { type: 'COMPARE_START', data: data }
+    });
+    
+    // Store temporarily locally for callback
     setCompareData(data);
-
-    if (networkMode === 'HOST') broadcastState({ type: 'COMPARE_START', data: data });
   };
 
   const handleComparisonComplete = () => {
@@ -955,8 +1000,6 @@ const App: React.FC = () => {
       const loserId = winnerId === pA.id ? pB.id : pA.id;
       const winnerName = winnerId === pA.id ? pA.name : pB.name;
 
-      addLog(`结果: ${winnerName} 赢得了比牌！`);
-      
       // Update statuses
       const newPlayers = players.map(p => {
           if (p.id === loserId) return { ...p, status: PlayerStatus.LOST, lastAction: '比牌输', lastActionType: 'negative' as const };
@@ -964,27 +1007,36 @@ const App: React.FC = () => {
           return p;
       });
 
-      // Find next player
-      // Start searching from current turn (initiator) + 1
       const nextIndex = calculateNextTurnIndex(currentTurnIndex, newPlayers);
       
-      // Update State
-      setPlayers(newPlayers);
-      setGamePhase(GamePhase.BETTING);
-      setComparingInitiatorId(null);
+      updateAndSyncState({
+        players: newPlayers,
+        gamePhase: GamePhase.BETTING,
+        comparingInitiatorId: null, // Clear these
+        currentTurnIndex: nextIndex,
+        lastLog: `结果: ${winnerName} 赢得了比牌！`
+      });
+      
       setCompareData(null);
-      setCurrentTurnIndex(nextIndex);
   };
 
   const handleGameEnd = useCallback((winnerId: number) => {
-    setGamePhase(GamePhase.SHOWDOWN);
-    setWinnerId(winnerId);
-    setPlayers(prev => prev.map(p => ({
+    const winner = players[winnerId];
+    const finalPot = pot; // snapshot
+    
+    const newPlayers = players.map(p => ({
         ...p,
         hasSeenCards: true,
-        chips: p.id === winnerId ? p.chips + pot : p.chips
-    })));
-    addLog(`*** ${players[winnerId].name} 赢得了底池 (${pot}) ***`);
+        chips: p.id === winnerId ? p.chips + finalPot : p.chips
+    }));
+    
+    updateAndSyncState({
+        gamePhase: GamePhase.SHOWDOWN,
+        winnerId: winnerId,
+        players: newPlayers,
+        pot: 0, // Reset pot visually after award or keep it? Usually keep it to show winnings
+        lastLog: `*** ${winner.name} 赢得了底池 (${finalPot}) ***`
+    });
   }, [players, pot]);
 
   // --- Bot AI Loop (Host Only) ---
@@ -1020,7 +1072,7 @@ const App: React.FC = () => {
       }, 1500); 
       return () => clearTimeout(timer);
     }
-  }, [currentTurnIndex, gamePhase, players, pot, currentRoundBet, getActivePlayers, handleGameEnd, raiseCount, networkMode]); // Removed nextTurn from dep as it is not needed here directly
+  }, [currentTurnIndex, gamePhase, players, pot, currentRoundBet, getActivePlayers, handleGameEnd, raiseCount, networkMode]);
 
 
   // --- Render ---
